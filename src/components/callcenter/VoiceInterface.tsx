@@ -43,6 +43,14 @@ export const VoiceInterface = ({ agentType, conversationHistory, onConversationU
         const transcriptText = event.results[current][0].transcript;
         setTranscript(transcriptText);
         
+        // Se o agente estiver falando e o usuário começar a falar, interromper
+        if (isSpeaking && audioRef.current) {
+          console.log('🛑 Usuário interrompeu o agente');
+          audioRef.current.pause();
+          audioRef.current = null;
+          setIsSpeaking(false);
+        }
+        
         if (silenceTimerRef.current) {
           clearTimeout(silenceTimerRef.current);
         }
@@ -161,10 +169,6 @@ export const VoiceInterface = ({ agentType, conversationHistory, onConversationU
 
   const speakResponse = async (text: string) => {
     setIsSpeaking(true);
-    
-    if (recognitionRef.current && isActive) {
-      recognitionRef.current.stop();
-    }
 
     try {
       const { data, error } = await supabase.functions.invoke('text-to-speech', {
@@ -183,26 +187,16 @@ export const VoiceInterface = ({ agentType, conversationHistory, onConversationU
       audio.playbackRate = voiceSettings.rate;
       
       audio.onended = () => {
+        audioRef.current = null;
         setIsSpeaking(false);
-        if (isActive && recognitionRef.current) {
-          setTimeout(() => {
-            try {
-              recognitionRef.current.start();
-            } catch (e) {
-              console.log('Recognition restart prevented:', e);
-            }
-          }, 500);
-        }
       };
 
       await audio.play();
 
     } catch (error) {
       console.error('Error speaking:', error);
+      audioRef.current = null;
       setIsSpeaking(false);
-      if (isActive && recognitionRef.current) {
-        recognitionRef.current.start();
-      }
       toast({
         title: "Erro na síntese de voz",
         description: "Não foi possível reproduzir o áudio.",
