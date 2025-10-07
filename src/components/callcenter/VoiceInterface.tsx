@@ -1,8 +1,7 @@
-import { useState, useRef, useEffect } from "react";
-import { Button } from "@/components/ui/button";
-import { Mic, MicOff, Volume2, Loader2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { Card } from "@/components/ui/card";
-import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { VoiceControls } from "./VoiceControls";
@@ -14,79 +13,102 @@ interface VoiceInterfaceProps {
 }
 
 export const VoiceInterface = ({ agentType, conversationHistory, onConversationUpdate }: VoiceInterfaceProps) => {
-  const [isRecording, setIsRecording] = useState(false);
+  const [isActive, setIsActive] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [transcript, setTranscript] = useState("");
-  const [currentMessage, setCurrentMessage] = useState("");
   const [voiceSettings, setVoiceSettings] = useState({
-    rate: 1.0,
-    pitch: 1.0,
-    volume: 1.0,
+    rate: 1,
+    pitch: 1,
+    volume: 1,
     voice: 'female'
   });
-
-  const recognitionRef = useRef<any>(null);
+  
   const { toast } = useToast();
+  const recognitionRef = useRef<any>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-      const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
-      recognitionRef.current = new SpeechRecognition();
-      recognitionRef.current.continuous = true;
-      recognitionRef.current.interimResults = true;
-      recognitionRef.current.lang = 'pt-BR';
+    const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+    
+    if (SpeechRecognition) {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'pt-BR';
 
-      recognitionRef.current.onresult = (event: any) => {
-        let interimTranscript = '';
-        let finalTranscript = '';
+      recognition.onresult = (event: any) => {
+        const current = event.resultIndex;
+        const transcriptText = event.results[current][0].transcript;
+        setTranscript(transcriptText);
+        
+        if (silenceTimerRef.current) {
+          clearTimeout(silenceTimerRef.current);
+        }
+        
+        if (event.results[current].isFinal) {
+          silenceTimerRef.current = setTimeout(() => {
+            if (transcriptText.trim()) {
+              handleSendMessage(transcriptText);
+              setTranscript("");
+            }
+          }, 1500);
+        }
+      };
 
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript;
-          if (event.results[i].isFinal) {
-            finalTranscript += transcript;
-          } else {
-            interimTranscript += transcript;
+      recognition.onerror = (event: any) => {
+        console.error('Speech recognition error:', event.error);
+        if (event.error !== 'no-speech') {
+          toast({
+            title: "Erro no reconhecimento de voz",
+            description: "Não foi possível reconhecer sua fala.",
+            variant: "destructive",
+          });
+        }
+      };
+
+      recognition.onend = () => {
+        if (isActive && !isSpeaking) {
+          try {
+            recognition.start();
+          } catch (e) {
+            console.log('Recognition restart prevented:', e);
           }
         }
-
-        setTranscript(interimTranscript || finalTranscript);
-
-        if (finalTranscript) {
-          handleSendMessage(finalTranscript);
-          setTranscript("");
-        }
       };
 
-      recognitionRef.current.onerror = (event: any) => {
-        console.error('Erro no reconhecimento:', event.error);
-        toast({
-          title: "Erro no reconhecimento de voz",
-          description: "Verifique as permissões do microfone",
-          variant: "destructive"
-        });
-        setIsRecording(false);
-      };
+      recognitionRef.current = recognition;
     }
 
     return () => {
       if (recognitionRef.current) {
         recognitionRef.current.stop();
       }
-      speechSynthesis.cancel();
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+      }
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
     };
-  }, []);
+  }, [isActive, isSpeaking]);
 
-  const toggleRecording = () => {
-    if (isRecording) {
+  const toggleActive = () => {
+    if (isActive) {
       recognitionRef.current?.stop();
-      setIsRecording(false);
+      setIsActive(false);
+      setTranscript("");
+      toast({
+        title: "Chamada encerrada",
+        description: "A conversação em tempo real foi finalizada.",
+      });
     } else {
       recognitionRef.current?.start();
-      setIsRecording(true);
+      setIsActive(true);
       toast({
-        title: "Gravação iniciada",
-        description: "Fale agora..."
+        title: "Chamada iniciada",
+        description: "Pode falar naturalmente. O sistema detectará automaticamente quando você parar de falar.",
       });
     }
   };
@@ -94,21 +116,23 @@ export const VoiceInterface = ({ agentType, conversationHistory, onConversationU
   const handleSendMessage = async (message: string) => {
     if (!message.trim() || isProcessing) return;
 
-    const userMessage = { role: 'user', content: message, timestamp: new Date() };
+    setIsProcessing(true);
+
+    const userMessage = {
+      role: 'user',
+      content: message,
+      timestamp: new Date()
+    };
+
     const updatedHistory = [...conversationHistory, userMessage];
     onConversationUpdate(updatedHistory);
-    setCurrentMessage("");
-    setIsProcessing(true);
 
     try {
       const { data, error } = await supabase.functions.invoke('ai-agent-chat', {
         body: {
-          message,
-          agentType,
-          conversationHistory: conversationHistory.map(msg => ({
-            role: msg.role === 'user' ? 'user' : 'assistant',
-            content: msg.content
-          }))
+          message: message,
+          agentType: agentType,
+          conversationHistory: conversationHistory
         }
       });
 
@@ -121,95 +145,150 @@ export const VoiceInterface = ({ agentType, conversationHistory, onConversationU
       };
 
       onConversationUpdate([...updatedHistory, assistantMessage]);
-      speakResponse(data.response);
+      await speakResponse(data.response);
 
-    } catch (error: any) {
-      console.error('Erro:', error);
+    } catch (error) {
+      console.error('Error:', error);
       toast({
-        title: "Erro na comunicação",
-        description: error.message || "Tente novamente",
-        variant: "destructive"
+        title: "Erro ao processar mensagem",
+        description: "Não foi possível obter resposta do agente.",
+        variant: "destructive",
       });
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const speakResponse = (text: string) => {
-    if ('speechSynthesis' in window) {
-      speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = 'pt-BR';
-      utterance.rate = voiceSettings.rate;
-      utterance.pitch = voiceSettings.pitch;
-      utterance.volume = voiceSettings.volume;
+  const speakResponse = async (text: string) => {
+    setIsSpeaking(true);
+    
+    if (recognitionRef.current && isActive) {
+      recognitionRef.current.stop();
+    }
 
-      const voices = speechSynthesis.getVoices();
-      const selectedVoice = voiceSettings.voice === 'female'
-        ? voices.find(v => v.lang === 'pt-BR' && v.name.includes('Google')) || voices.find(v => v.lang === 'pt-BR')
-        : voices.find(v => v.lang === 'pt-BR');
+    try {
+      const { data, error } = await supabase.functions.invoke('text-to-speech', {
+        body: { 
+          text,
+          voice: voiceSettings.voice === 'female' ? 'Aria' : 'Charlie'
+        }
+      });
+
+      if (error) throw error;
+
+      const audio = new Audio(`data:audio/mpeg;base64,${data.audio}`);
+      audioRef.current = audio;
       
-      if (selectedVoice) utterance.voice = selectedVoice;
+      audio.volume = voiceSettings.volume;
+      audio.playbackRate = voiceSettings.rate;
+      
+      audio.onended = () => {
+        setIsSpeaking(false);
+        if (isActive && recognitionRef.current) {
+          setTimeout(() => {
+            try {
+              recognitionRef.current.start();
+            } catch (e) {
+              console.log('Recognition restart prevented:', e);
+            }
+          }, 500);
+        }
+      };
 
-      utterance.onstart = () => setIsSpeaking(true);
-      utterance.onend = () => setIsSpeaking(false);
+      await audio.play();
 
-      speechSynthesis.speak(utterance);
+    } catch (error) {
+      console.error('Error speaking:', error);
+      setIsSpeaking(false);
+      if (isActive && recognitionRef.current) {
+        recognitionRef.current.start();
+      }
+      toast({
+        title: "Erro na síntese de voz",
+        description: "Não foi possível reproduzir o áudio.",
+        variant: "destructive",
+      });
     }
   };
 
   return (
-    <Card className="p-6 space-y-6">
+    <Card className="p-6 animate-fade-in">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-2xl font-bold">Chamada em Tempo Real</h2>
+        {isActive ? (
+          <Badge variant="default" className="animate-pulse">
+            🔴 AO VIVO
+          </Badge>
+        ) : (
+          <Badge variant="secondary">
+            Desconectado
+          </Badge>
+        )}
+      </div>
+
       <VoiceControls 
         settings={voiceSettings}
         onSettingsChange={setVoiceSettings}
       />
 
-      <div className="space-y-4">
-        <div className="flex gap-4">
-          <Textarea
-            value={currentMessage}
-            onChange={(e) => setCurrentMessage(e.target.value)}
-            placeholder="Digite sua mensagem ou use o microfone..."
-            className="flex-1"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSendMessage(currentMessage);
-              }
-            }}
-          />
-          <div className="flex flex-col gap-2">
-            <Button
-              onClick={toggleRecording}
-              variant={isRecording ? "destructive" : "default"}
-              size="icon"
-              className="h-12 w-12"
-            >
-              {isRecording ? <MicOff /> : <Mic />}
-            </Button>
-            <Button
-              onClick={() => handleSendMessage(currentMessage)}
-              disabled={isProcessing || !currentMessage.trim()}
-              size="icon"
-              className="h-12 w-12"
-            >
-              {isProcessing ? <Loader2 className="animate-spin" /> : <Volume2 />}
-            </Button>
-          </div>
+      <div className="mt-6 space-y-6">
+        <div className="flex justify-center">
+          <Button
+            onClick={toggleActive}
+            size="lg"
+            variant={isActive ? "destructive" : "default"}
+            className="h-24 w-24 rounded-full text-lg font-bold shadow-lg hover:scale-105 transition-transform"
+          >
+            {isActive ? "🔴 Encerrar" : "📞 Iniciar"}
+          </Button>
         </div>
 
-        {transcript && (
-          <div className="p-4 bg-muted rounded-lg">
-            <p className="text-sm text-muted-foreground">Transcrevendo...</p>
-            <p className="text-foreground">{transcript}</p>
+        {isActive && (
+          <div className="space-y-4">
+            {transcript && (
+              <div className="p-4 bg-primary/10 rounded-lg border border-primary/20">
+                <p className="text-sm font-medium text-primary mb-1">Você está dizendo:</p>
+                <p className="text-base">{transcript}</p>
+              </div>
+            )}
+
+            {isProcessing && (
+              <div className="p-4 bg-muted/50 rounded-lg text-center">
+                <div className="flex items-center justify-center gap-2">
+                  <div className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <div className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <div className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                  <span className="ml-2 text-muted-foreground">Processando...</span>
+                </div>
+              </div>
+            )}
+
+            {isSpeaking && (
+              <div className="p-4 bg-secondary/50 rounded-lg text-center">
+                <p className="text-lg font-medium animate-pulse">
+                  🎤 Agente respondendo...
+                </p>
+              </div>
+            )}
+
+            {!transcript && !isProcessing && !isSpeaking && (
+              <div className="p-4 bg-muted/30 rounded-lg text-center">
+                <p className="text-muted-foreground">
+                  🎧 Escutando... Fale naturalmente
+                </p>
+              </div>
+            )}
           </div>
         )}
 
-        {isSpeaking && (
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Volume2 className="w-4 h-4 animate-pulse" />
-            <span>Reproduzindo resposta...</span>
+        {!isActive && (
+          <div className="text-center p-8 bg-muted/30 rounded-lg">
+            <p className="text-muted-foreground mb-2">
+              Clique no botão acima para iniciar uma chamada em tempo real.
+            </p>
+            <p className="text-sm text-muted-foreground">
+              Não é necessário clicar em botões durante a conversa. O sistema detectará automaticamente quando você parar de falar.
+            </p>
           </div>
         )}
       </div>
