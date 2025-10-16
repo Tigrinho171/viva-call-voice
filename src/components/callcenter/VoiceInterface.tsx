@@ -43,21 +43,24 @@ export const VoiceInterface = ({ agentType, conversationHistory, onConversationU
         const transcriptText = event.results[current][0].transcript;
         setTranscript(transcriptText);
         
-        // Se o agente estiver falando e o usuário começar a falar, interromper
+        // 🛑 INTERRUPÇÃO: Se o agente estiver falando e o usuário começar a falar, interromper imediatamente
         if (isSpeaking && audioRef.current) {
           console.log('🛑 Usuário interrompeu o agente');
           audioRef.current.pause();
+          audioRef.current.currentTime = 0;
           audioRef.current = null;
           setIsSpeaking(false);
         }
         
+        // Limpar timer de silêncio anterior
         if (silenceTimerRef.current) {
           clearTimeout(silenceTimerRef.current);
         }
         
+        // Quando a fala for finalizada, aguardar 1.5s de silêncio antes de processar
         if (event.results[current].isFinal) {
           silenceTimerRef.current = setTimeout(() => {
-            if (transcriptText.trim()) {
+            if (transcriptText.trim() && !isProcessing) {
               handleSendMessage(transcriptText);
               setTranscript("");
             }
@@ -67,7 +70,7 @@ export const VoiceInterface = ({ agentType, conversationHistory, onConversationU
 
       recognition.onerror = (event: any) => {
         console.error('Speech recognition error:', event.error);
-        if (event.error !== 'no-speech') {
+        if (event.error !== 'no-speech' && event.error !== 'aborted') {
           toast({
             title: "Erro no reconhecimento de voz",
             description: "Não foi possível reconhecer sua fala.",
@@ -77,9 +80,14 @@ export const VoiceInterface = ({ agentType, conversationHistory, onConversationU
       };
 
       recognition.onend = () => {
-        if (isActive && !isSpeaking) {
+        // Reiniciar reconhecimento apenas se a chamada estiver ativa
+        if (isActive) {
           try {
-            recognition.start();
+            setTimeout(() => {
+              if (recognitionRef.current && isActive) {
+                recognition.start();
+              }
+            }, 100);
           } catch (e) {
             console.log('Recognition restart prevented:', e);
           }
@@ -98,9 +106,10 @@ export const VoiceInterface = ({ agentType, conversationHistory, onConversationU
       }
       if (audioRef.current) {
         audioRef.current.pause();
+        audioRef.current = null;
       }
     };
-  }, [isActive, isSpeaking]);
+  }, [isActive, isSpeaking, isProcessing]);
 
   const toggleActive = () => {
     if (isActive) {
