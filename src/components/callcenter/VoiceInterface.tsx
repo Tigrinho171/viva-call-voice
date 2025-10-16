@@ -44,11 +44,9 @@ export const VoiceInterface = ({ agentType, conversationHistory, onConversationU
         setTranscript(transcriptText);
         
         // 🛑 INTERRUPÇÃO: Se o agente estiver falando e o usuário começar a falar, interromper imediatamente
-        if (isSpeaking && audioRef.current) {
+        if (isSpeaking) {
           console.log('🛑 Usuário interrompeu o agente');
-          audioRef.current.pause();
-          audioRef.current.currentTime = 0;
-          audioRef.current = null;
+          speechSynthesis.cancel();
           setIsSpeaking(false);
         }
         
@@ -104,10 +102,7 @@ export const VoiceInterface = ({ agentType, conversationHistory, onConversationU
       if (silenceTimerRef.current) {
         clearTimeout(silenceTimerRef.current);
       }
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
+      speechSynthesis.cancel();
     };
   }, [isActive, isSpeaking, isProcessing]);
 
@@ -180,31 +175,36 @@ export const VoiceInterface = ({ agentType, conversationHistory, onConversationU
     setIsSpeaking(true);
 
     try {
-      const { data, error } = await supabase.functions.invoke('text-to-speech', {
-        body: { 
-          text,
-          voice: voiceSettings.voice === 'female' ? 'Aria' : 'Charlie'
-        }
-      });
-
-      if (error) throw error;
-
-      const audio = new Audio(`data:audio/mpeg;base64,${data.audio}`);
-      audioRef.current = audio;
+      // Usar Web Speech API nativa do navegador (sem dependência de APIs externas)
+      const utterance = new SpeechSynthesisUtterance(text);
       
-      audio.volume = voiceSettings.volume;
-      audio.playbackRate = voiceSettings.rate;
+      // Configurar voz em português brasileiro
+      const voices = speechSynthesis.getVoices();
+      const ptBrVoice = voices.find(v => v.lang === 'pt-BR' || v.lang.startsWith('pt')) 
+        || voices.find(v => v.lang === 'en-US');
       
-      audio.onended = () => {
-        audioRef.current = null;
+      if (ptBrVoice) {
+        utterance.voice = ptBrVoice;
+      }
+      
+      utterance.lang = 'pt-BR';
+      utterance.rate = voiceSettings.rate;
+      utterance.pitch = voiceSettings.pitch;
+      utterance.volume = voiceSettings.volume;
+
+      utterance.onend = () => {
         setIsSpeaking(false);
       };
 
-      await audio.play();
+      utterance.onerror = (event) => {
+        console.error('Speech synthesis error:', event);
+        setIsSpeaking(false);
+      };
+
+      speechSynthesis.speak(utterance);
 
     } catch (error) {
       console.error('Error speaking:', error);
-      audioRef.current = null;
       setIsSpeaking(false);
       toast({
         title: "Erro na síntese de voz",
